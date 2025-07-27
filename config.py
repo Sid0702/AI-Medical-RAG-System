@@ -29,7 +29,7 @@ ENCYCLOPEDIA_FILE = "Medical_Encyclopedia.pdf"
 
 # --- Model & RAG Parameters ---
 EMBEDDING_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
-LLM_MODEL_NAME = "gemini-1.5-flash"
+LLM_MODEL_NAME = "gemini-1.5-flash" # Using Flash for speed and cost-effectiveness
 
 # Industry-standard chunking parameters
 CHUNK_SIZE = 1000

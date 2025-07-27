@@ -14,6 +14,7 @@ st.set_page_config(
 st.title("🚀 AI Medical RAG System")
 st.markdown("Your Subject-Specific Medical Study Reference, powered by Google Gemini.")
 
+# Initialize the core system (encyclopedia) once and cache it
 @st.cache_resource
 def startup_initialization():
     rag.initialize_rag_system()
@@ -60,12 +61,19 @@ if submit_button:
     if not query_text:
         st.error("Please enter a question.")
     else:
-        with st.spinner("Searching documents and generating answer... This may take a moment."):
-            
-            subject_to_search = None
-            if selected_option != "Default (Medical Encyclopedia)":
-                subject_to_search = selected_option
+        # Determine the subject to search
+        subject_to_search = None
+        if selected_option != "Default (Medical Encyclopedia)":
+            subject_to_search = selected_option
 
+        # Set the spinner message based on whether a new subject is being processed
+        spinner_message = "Searching documents and generating answer..."
+        if subject_to_search:
+            index_path = os.path.join(config.INDEX_FOLDER, subject_to_search.replace(" ", "_") + ".faiss")
+            if not os.path.exists(index_path):
+                spinner_message = f"Processing '{subject_to_search}' for the first time and generating answer..."
+
+        with st.spinner(spinner_message):
             user_file_path = None
             if uploaded_file is not None:
                 try:

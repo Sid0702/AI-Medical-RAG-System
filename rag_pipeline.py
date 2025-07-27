@@ -5,39 +5,35 @@ import faiss
 from langchain_huggingface import HuggingFaceEmbeddings
 import google.generativeai as genai
 import pickle
-import streamlit as st
-import requests
-import zipfile
-from io import BytesIO
 from typing import List
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import logging
+from dotenv import load_dotenv
 
 import config
 
-# --- API Key Configuration ---
-try:
-    # This will work when deployed on Streamlit Community Cloud
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-except (KeyError, AttributeError):
-    # This is a fallback for local development if you use a .env file
-    from dotenv import load_dotenv
-    load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Model Initialization ---
+# --- API Key and Model Initialization ---
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+    logging.info("Successfully configured Gemini API key from .env file.")
+else:
+    logging.error("GOOGLE_API_KEY not found in .env file. Please create a .env file and add your key.")
+
 try:
-    # Use the updated HuggingFaceEmbeddings wrapper
     EMBEDDING_MODEL = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL_NAME)
+    logging.info(f"Successfully loaded embedding model: {config.EMBEDDING_MODEL_NAME}")
 except Exception as e:
     EMBEDDING_MODEL = None
+    logging.error(f"Failed to load embedding model: {e}")
 
-# --- Text Splitting and PDF Loading ---
+# --- Core Pipeline Functions ---
+
 def load_and_chunk_pdf(file_path):
-    """
-    Loads a PDF, extracts its text, and splits it using RecursiveCharacterTextSplitter.
-    """
     doc_name = os.path.basename(file_path)
     full_text = ""
     try:
@@ -45,9 +41,11 @@ def load_and_chunk_pdf(file_path):
             for page in doc:
                 full_text += page.get_text() + "\n"
     except Exception as e:
+        logging.error(f"Failed to open or read PDF {file_path}: {e}")
         return []
 
     if not full_text.strip():
+        logging.warning(f"No text extracted from PDF: {doc_name}")
         return []
 
     text_splitter = RecursiveCharacterTextSplitter(
@@ -58,21 +56,18 @@ def load_and_chunk_pdf(file_path):
     )
     
     text_chunks = text_splitter.split_text(full_text)
+    logging.info(f"Split '{doc_name}' into {len(text_chunks)} chunks.")
 
-    chunks_with_metadata = [
+    return [
         {"content": chunk, "source": f"{doc_name}, Chunk {i+1}"}
         for i, chunk in enumerate(text_chunks)
     ]
-    
-    return chunks_with_metadata
 
-# --- FAISS Indexing ---
 def create_faiss_index(chunks, index_path):
     if not EMBEDDING_MODEL or not chunks:
         return
 
     contents = [chunk['content'] for chunk in chunks]
-    # Use the embed_documents method for batch processing
     embeddings = EMBEDDING_MODEL.embed_documents(contents)
     
     dimension = len(embeddings[0])
@@ -88,81 +83,101 @@ def search_faiss_index(query, index_path, top_k=3):
         return []
         
     try:
-        # Use the embed_query method for single queries
         query_embedding = EMBEDDING_MODEL.embed_query(query)
         query_vector = np.array([query_embedding]).astype('float32')
         
         index_file = f"{index_path}.faiss"
-        meta_file = f"{index_path}.meta"
-
         if not os.path.exists(index_file):
             return []
 
         index = faiss.read_index(index_file)
-        with open(meta_file, 'rb') as f:
+        with open(f"{index_path}.meta", 'rb') as f:
             metadata = pickle.load(f)
             
         _, indices = index.search(query_vector, top_k)
         
         valid_indices = [i for i in indices[0] if i < len(metadata)]
         return [metadata[i] for i in valid_indices]
-    except Exception:
+    except Exception as e:
+        logging.error(f"An error occurred during FAISS search on {index_path}: {e}")
         return []
 
-# --- LLM and RAG Logic ---
 def get_llm_response(query, context):
     try:
         model = genai.GenerativeModel(config.LLM_MODEL_NAME)
         context_str = "\n\n---\n\n".join([f"Source: {item['source']}\nContent: {item['content']}" for item in context])
         
         prompt = f"""
-        You are a highly intelligent AI medical assistant. Answer medical questions based *only* on the context provided below.
-        
+        You are an expert AI medical assistant designed for doctors and medical students. Your task is to provide a detailed, descriptive, and comprehensive answer to the following question based *exclusively* on the context provided from trusted medical documents.
+
+        When formulating your answer, adhere to these guidelines:
+        1.  **Be Detailed:** Synthesize information from all relevant context chunks to provide a thorough explanation. Do not just copy-paste a single chunk.
+        2.  **Be Descriptive:** Use clear, professional medical terminology. Explain complex topics as you would to a medical colleague.
+        3.  **Cite Everything:** After every key point or piece of information, you must cite the source using the format [Source: PDF_Name, Chunk X].
+        4.  **Stay Grounded:** Only use the information from the context provided below. If the context does not contain the answer, state that clearly. Do not use outside knowledge.
+
         Context:
         ---
         {context_str}
         ---
-        
-        Cite your sources clearly using the format [Source: PDF_Name, Chunk X]. If the context does not contain the answer, state that clearly. Do not use outside knowledge.
 
         Question: {query}
-        Answer:
+
+        Detailed Answer:
         """
         
         response = model.generate_content(prompt)
-        sources = list(set([item['source'] for item in context]))
-        return response.text, sources
+        return response.text, list(set([item['source'] for item in context]))
     except Exception as e:
+        logging.error(f"An error occurred with the Gemini API call: {e}")
         return f"An error occurred with the AI model: {e}", []
+
+def get_or_create_index(subject_name):
+    """
+    Checks if an index for a subject exists. If not, it creates one on-the-fly.
+    """
+    index_path = os.path.join(config.INDEX_FOLDER, subject_name.replace(" ", "_"))
+    
+    if os.path.exists(f"{index_path}.faiss"):
+        logging.info(f"Index for '{subject_name}' already exists. Loading it.")
+        return index_path
+    
+    logging.info(f"Index for '{subject_name}' not found. Creating it now...")
+    pdf_path = os.path.join(config.PDF_FOLDER, f"{subject_name}.pdf")
+
+    if not os.path.exists(pdf_path):
+        logging.warning(f"PDF file not found for '{subject_name}' at {pdf_path}. Cannot create index.")
+        return None
+        
+    chunks = load_and_chunk_pdf(pdf_path)
+    if chunks:
+        create_faiss_index(chunks, index_path)
+        logging.info(f"✅ FAISS index created for: {subject_name}.pdf")
+        return index_path
+    
+    return None
 
 def get_rag_answer(query, subject=None, user_file_path=None):
     context = []
-    all_sources = set()
+    
+    # Always search the encyclopedia
+    encyclopedia_index_path = get_or_create_index(config.ENCYCLOPEDIA_FILE.replace('.pdf', ''))
+    if encyclopedia_index_path:
+        context.extend(search_faiss_index(query, encyclopedia_index_path, top_k=3))
 
-    encyclopedia_index_name = config.ENCYCLOPEDIA_FILE.replace('.pdf', '')
-    encyclopedia_search_path = os.path.join(config.INDEX_FOLDER, encyclopedia_index_name)
-    encyclopedia_results = search_faiss_index(query, encyclopedia_search_path, top_k=3)
-    if encyclopedia_results:
-        context.extend(encyclopedia_results)
-        for item in encyclopedia_results: all_sources.add(item['source'])
-
+    # On-demand search for the selected subject
     if subject:
-        subject_index_name = subject.replace(" ", "_")
-        subject_search_path = os.path.join(config.INDEX_FOLDER, subject_index_name)
-        subject_results = search_faiss_index(query, subject_search_path, top_k=3)
-        if subject_results:
-            context.extend(subject_results)
-            for item in subject_results: all_sources.add(item['source'])
+        subject_index_path = get_or_create_index(subject)
+        if subject_index_path:
+            context.extend(search_faiss_index(query, subject_index_path, top_k=3))
 
+    # Search user-uploaded file
     if user_file_path:
         user_index_path = os.path.join(config.INDEX_FOLDER, "temp_user_file")
         user_chunks = load_and_chunk_pdf(user_file_path)
         if user_chunks:
             create_faiss_index(user_chunks, user_index_path)
-            user_results = search_faiss_index(query, user_index_path, top_k=2)
-            if user_results:
-                context.extend(user_results)
-                for item in user_results: all_sources.add(item['source'])
+            context.extend(search_faiss_index(query, user_index_path, top_k=2))
         
         if os.path.exists(f"{user_index_path}.faiss"): os.remove(f"{user_index_path}.faiss")
         if os.path.exists(f"{user_index_path}.meta"): os.remove(f"{user_index_path}.meta")
@@ -171,40 +186,16 @@ def get_rag_answer(query, subject=None, user_file_path=None):
         return "Could not find any relevant information in the provided documents.", []
 
     unique_context = list({item['content']: item for item in context}.values())
-    answer, _ = get_llm_response(query, unique_context)
-    return answer, sorted(list(all_sources))
+    answer, sources = get_llm_response(query, unique_context)
+    return answer, sorted(sources)
 
-# --- System Initialization ---
 def initialize_rag_system():
+    logging.info("--- Initializing RAG System for Local Development ---")
     os.makedirs(config.PDF_FOLDER, exist_ok=True)
-    pdf_files_exist = len(os.listdir(config.PDF_FOLDER)) >= len(config.MEDICAL_SUBJECTS)
-
-    if not pdf_files_exist:
-        PDF_ZIP_URL = "https://drive.google.com/uc?export=download&id=1ltGh9dDrCT5_cvIk_R9m7lhSRm3AuTZh" 
-        if PDF_ZIP_URL != "https://drive.google.com/uc?export=download&id=1ltGh9dDrCT5_cvIk_R9m7lhSRm3AuTZh":
-            try:
-                response = requests.get(PDF_ZIP_URL, stream=True)
-                response.raise_for_status()
-                with zipfile.ZipFile(BytesIO(response.content)) as z:
-                    z.extractall(config.PDF_FOLDER)
-            except Exception:
-                return
-
     os.makedirs(config.INDEX_FOLDER, exist_ok=True)
-    all_pdfs = config.MEDICAL_SUBJECTS + [config.ENCYCLOPEDIA_FILE.replace('.pdf', '')]
+
+    # On startup, only create the index for the encyclopedia
+    logging.info("Checking for core Medical Encyclopedia index...")
+    get_or_create_index(config.ENCYCLOPEDIA_FILE.replace('.pdf', ''))
     
-    print("--- Initializing RAG System: Checking for FAISS indexes ---")
-    for name in all_pdfs:
-        pdf_path = os.path.join(config.PDF_FOLDER, f"{name}.pdf")
-        index_path = os.path.join(config.INDEX_FOLDER, name.replace(" ", "_").replace('.pdf', ''))
-        
-        if not os.path.exists(f"{index_path}.faiss"):
-            print(f"Index for '{name}' not found. Creating now...")
-            if os.path.exists(pdf_path):
-                chunks = load_and_chunk_pdf(pdf_path)
-                if chunks:
-                    create_faiss_index(chunks, index_path)
-                    print(f"✅ FAISS index created for: {name}.pdf")
-            else:
-                print(f"⚠️ PDF not found for '{name}'. Skipping index creation.")
-    print("--- RAG System Initialization Complete ---")
+    logging.info("--- RAG System Initialization Complete ---")
