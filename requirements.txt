@@ -1,0 +1,11 @@
+streamlit
+PyMuPDF
+sentence-transformers
+faiss-cpu
+numpy
+google-generativeai
+python-dotenv
+requests
+langchain-text-splitters
+langchain-community
+langchain-huggingface

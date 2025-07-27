@@ -1,0 +1,17 @@
+# Python virtual environment
+venv/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.env
+
+# FAISS and PDF folders
+/faiss_indexes/
+/medical_pdfs/
+/uploads/
+
+# IDE and OS specific files
+.idea/
+.vscode/
+*.DS_Store
