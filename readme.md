@@ -1,6 +1,3 @@
-Here's your content formatted as a proper `README.md` file:
-
-```markdown
 # 🧠 AI Medical RAG System
 
 This project is an advanced **Retrieval-Augmented Generation (RAG)** system designed for **doctors**, **medical students**, and **researchers**. It provides a fast, subject-specific reference tool by leveraging a local library of medical PDFs and a powerful Large Language Model (LLM).
@@ -135,7 +132,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 * [Streamlit](https://streamlit.io/)
 * [Google Gemini](https://ai.google.dev/)
 
-```
-
-Let me know if you want me to export this as a `.md` file.
 ```
